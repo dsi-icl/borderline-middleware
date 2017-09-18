@@ -1,8 +1,8 @@
 const express = require('express');
 const mongodb = require('mongodb').MongoClient;
-const multer  = require('multer');
+const multer = require('multer');
 const body_parser = require('body-parser');
-const { ErrorHelper, Constants, RegistryHelper } = require('borderline-utils');
+const { ErrorHelper, Constants, ConfigurationHelper, RegistryHelper } = require('borderline-utils');
 
 const package_file = require('../package.json');
 const Options = require('./core/options.js');
@@ -20,23 +20,8 @@ function BorderlineMiddleware(config) {
     // Bind private member functions
     this._connectDb = BorderlineMiddleware.prototype._connectDb.bind(this);
     this._setupQueryEndpoints = BorderlineMiddleware.prototype._setupQueryEndpoints.bind(this);
+    this._configurationHandler = BorderlineMiddleware.prototype._configurationHandler.bind(this);
     this._registryHandler = BorderlineMiddleware.prototype._registryHandler.bind(this);
-
-    // Setup Express Application
-    // Parse JSON body when received
-    this.app.use(body_parser.urlencoded({extended: true, limit: '1tb'}));
-    this.app.use(body_parser.json());
-
-    // Removes default express headers
-    this.app.set('x-powered-by', false);
-    // Allow CORS request when enabled
-    if (this.config.enableCors === true) {
-        this.app.use(function (__unused__req, res, next) {
-            res.header('Access-Control-Allow-Origin', '*');
-            res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-            next();
-        });
-    }
 }
 
 /**
@@ -45,23 +30,64 @@ function BorderlineMiddleware(config) {
  * @return {Promise} Resolves to a Express.js Application router on success,
  * rejects an error stack otherwise
  */
-BorderlineMiddleware.prototype.start = function() {
+BorderlineMiddleware.prototype.start = function () {
     let _this = this;
     return new Promise(function (resolve, reject) {
         _this._connectDb().then(function () {
-            // Start status periodic update
-            _this._registryHandler();
 
-            // Setup route using controllers
-            _this._setupQueryEndpoints('/query');
-            _this.setupRegistry();
+            _this._configurationHandler();
 
-            resolve(_this.app); // All good, returns application
-        }, function (error) {
-            _this.app.all('*', function(__unused__req, res) {
-                res.status(501);
-                res.json(ErrorHelper('Database connection failure', error));
+            _this.configurationHandler.getModel().then(function (model) {
+
+                console.log('Before :', model);
+                // Flattening configuration
+                _this.config = Object.assign({}, model, _this.config);
+
+                console.log('After :', _this.config);
+                // Setup Express Application
+                // Parse JSON body when received
+                _this.app.use(body_parser.urlencoded({ extended: true, limit: '1tb' }));
+                _this.app.use(body_parser.json());
+
+                // Removes default express headers
+                _this.app.set('x-powered-by', false);
+                // Allow CORS request when enabled
+                if (_this.config.enableCors === true) {
+                    _this.app.use(function (__unused__req, res, next) {
+                        res.header('Access-Control-Allow-Origin', '*');
+                        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+                        next();
+                    });
+                }
+
+                _this.storage = new ObjectStorage({
+                    url: _this.config.swiftURL,
+                    username: _this.config.swiftUsername,
+                    password: _this.config.swiftPassword
+                });
+
+                // Starting the server
+                const _server = _this.app.listen(_this.config.port, _this.config.interface, null, function (error) {
+
+                    if (error)
+                        reject(ErrorHelper('Cannot listen', error));
+
+                    // Updating the configuration port with the actual value if port === 0 was provided
+                    _this.config.port = _server.address().port;
+
+                    // Start status periodic update
+                    _this._registryHandler();
+
+                    // Setup route using controllers
+                    _this._setupQueryEndpoints('/query');
+                    _this.setupRegistry();
+
+                    resolve({ app: _this.app, server: _server }); // All good, returns application
+                });
+            }).catch(function (error) {
+                reject(ErrorHelper('Cannot fetch remote connection', error));
             });
+        }, function (error) {
             reject(ErrorHelper('Cannot establish mongoDB connection', error));
         });
     });
@@ -73,14 +99,14 @@ BorderlineMiddleware.prototype.start = function() {
  * @return {Promise} Resolves to true on success,
  * rejects an error stack otherwise
  */
-BorderlineMiddleware.prototype.stop = function() {
+BorderlineMiddleware.prototype.stop = function () {
     let _this = this;
     return new Promise(function (resolve, reject) {
         // Stop status update
         _this.registryHelper.stopPeriodicUpdate();
 
         // Disconnect DB --force
-        _this.db.close(true).then(function(error) {
+        _this.db.close(true).then(function (error) {
             if (error)
                 reject(ErrorHelper('Closing mongoDB connection failed', error));
             else
@@ -90,12 +116,27 @@ BorderlineMiddleware.prototype.stop = function() {
 };
 
 /**
+ * @fn _configurationHandler
+ * @desc Setup a routine to fetch general configuration from database
+ * Retreive the
+ * @private
+ */
+BorderlineMiddleware.prototype._configurationHandler = function () {
+    let _this = this;
+
+    // Connect to the registry collection
+    _this.configurationCollection = _this.db.collection(Constants.BL_GLOBAL_COLLECTION_CONFIGURATION);
+    // Create RegistryHelper class
+    _this.configurationHandler = new ConfigurationHelper(Constants.BL_MIDDLEWARE_SERVICE, _this.configurationCollection);
+};
+
+/**
  * @fn _registryHandler
  * @desc Setup a routine to update the global registry
  * Put a status object in the DB based on this current configuration
  * @private
  */
-BorderlineMiddleware.prototype._registryHandler = function() {
+BorderlineMiddleware.prototype._registryHandler = function () {
     let _this = this;
 
     // Connect to the registry collection
@@ -117,7 +158,7 @@ BorderlineMiddleware.prototype._registryHandler = function() {
  * @fn setupRegistry
  * @desc Initialize the registry related routes
  */
-BorderlineMiddleware.prototype.setupRegistry = function() {
+BorderlineMiddleware.prototype.setupRegistry = function () {
     // Import the controller
     let registryController = require('./controllers/registryController.js');
     this.registryController = new registryController(this.registryHelper);
@@ -131,7 +172,7 @@ BorderlineMiddleware.prototype.setupRegistry = function() {
  * @param prefix This string is appended before the uris definition
  * @private
  */
-BorderlineMiddleware.prototype._setupQueryEndpoints = function(prefix) {
+BorderlineMiddleware.prototype._setupQueryEndpoints = function (prefix) {
     let _this = this;
 
     // Import & instantiate controller modules
@@ -186,17 +227,17 @@ BorderlineMiddleware.prototype._setupQueryEndpoints = function(prefix) {
  * @return {Promise} Resolves to true on success
  * @private
  */
-BorderlineMiddleware.prototype._connectDb = function() {
+BorderlineMiddleware.prototype._connectDb = function () {
     let _this = this;
     let urls_list = [
         this.config.mongoURL,
     ];
-    return new Promise(function(resolve, reject) {
+    return new Promise(function (resolve, reject) {
         //Create one Promise par DB to connect to
         let promises = [];
         for (let i = 0; i < urls_list.length; i++) {
-            let p = new Promise(function(resolve, reject) {
-                mongodb.connect(urls_list[i], function(err, db) {
+            let p = new Promise(function (resolve, reject) {
+                mongodb.connect(urls_list[i], function (err, db) {
                     if (err !== null)
                         reject(ErrorHelper('Database connection failure', err));
                     else
@@ -206,14 +247,9 @@ BorderlineMiddleware.prototype._connectDb = function() {
             promises.push(p);
         }
         //Resolve all promises in parallel
-        Promise.all(promises).then(function(databases) {
+        Promise.all(promises).then(function (databases) {
             _this.db = databases[0];
             _this.queryCollection = _this.db.collection(Constants.BL_MIDDLEWARE_COLLECTION_QUERY);
-            _this.storage =  new ObjectStorage({
-                url: _this.config.swiftURL,
-                username: _this.config.swiftUsername,
-                password: _this.config.swiftPassword
-            });
 
             resolve(true);
         }, function (error) {
