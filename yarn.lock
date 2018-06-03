@@ -874,9 +874,9 @@ boom@5.x.x:
   dependencies:
     hoek "4.x.x"
 
-borderline-utils@0.1.4:
-  version "0.1.4"
-  resolved "https://registry.yarnpkg.com/borderline-utils/-/borderline-utils-0.1.4.tgz#7b71e95a91d7433d2c0e6a6fed4c545930b62a4c"
+borderline-utils@0.1.6:
+  version "0.1.6"
+  resolved "https://registry.yarnpkg.com/borderline-utils/-/borderline-utils-0.1.6.tgz#ead359d500067cdb75f6a20716072b951d250d04"
   dependencies:
     bytes "3.0.0"
     fs-extra "6.0.1"
